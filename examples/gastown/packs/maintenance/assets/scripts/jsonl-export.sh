@@ -41,37 +41,47 @@ count_jsonl_rows() {
     jq -s -r 'if length == 0 then 0 else ((.[0].rows // []) | length) end' || echo "0"
 }
 
-# Scrub test-only rows while preserving the JSON export structure and legitimate
-# rows in the same payload. The input is one JSON object with a .rows array, not
-# newline-delimited JSON, so row-level filtering must happen inside jq.
-scrub_exported_issues() {
-    jq -c '
-        if (.rows? | type) == "array" then
-            .rows |= map(
-                select(
-                    ((.title // "") | test("^(Test Issue|test_)") | not) and
-                    (
-                        (
-                            (.id // "") == "bd-1" or
-                            (.id // "") == "bd-abc12" or
-                            ((.id // "") | test("^(testdb_|beads_t)"))
-                        ) | not
-                    )
-                )
-            )
-        else
+# Validate a dolt issues export and emit a canonical {"rows": [...]} payload.
+# Dolt returns `{}` on a SELECT that matched zero rows — a freshly registered
+# rig before its first issue is filed, for example — so the validator accepts
+# both the standard `{"rows": [...]}` form and the empty-object form, emitting
+# the canonical shape in either case. Anything else (no input, malformed JSON,
+# non-object types, or objects with content but no rows array) is a real
+# failure: the validator rejects it so the export pipeline can mark the
+# database failed instead of writing a softened payload to the archive.
+validate_exported_issues() {
+    jq -e -c '
+        if type != "object" then
+            error("issues export must be a JSON object with a rows array")
+        elif (.rows? | type) == "array" then
             .
+        elif length == 0 then
+            {rows: []}
+        else
+            error("issues export must be a JSON object with a rows array")
         end
     '
 }
 
-validate_exported_issues() {
-    jq -e -c '
-        if (type == "object") and ((.rows? | type) == "array") then
-            .
-        else
-            error("issues export must be a JSON object with a rows array")
-        end
+# Scrub test-only rows while preserving the JSON export structure and legitimate
+# rows in the same payload. The input is one JSON object with a .rows array, not
+# newline-delimited JSON, so row-level filtering must happen inside jq. Pipe
+# through validate first so the row filter always sees a canonical shape and
+# malformed input fails early via pipefail.
+scrub_exported_issues() {
+    validate_exported_issues | jq -c '
+        .rows |= map(
+            select(
+                ((.title // "") | test("^(Test Issue|test_)") | not) and
+                (
+                    (
+                        (.id // "") == "bd-1" or
+                        (.id // "") == "bd-abc12" or
+                        ((.id // "") | test("^(testdb_|beads_t)"))
+                    ) | not
+                )
+            )
+        )
     '
 }
 
@@ -546,13 +556,6 @@ while IFS= read -r DB; do
         FAILED_DBS="${FAILED_DBS}$DB
 "
         continue
-    fi
-
-    # Normalize dolt's empty-result form ({}) to canonical {"rows": []} so the
-    # downstream scrub/validate/count chain sees a consistent shape regardless
-    # of whether the query returned zero or N rows.
-    if ! jq -e 'has("rows")' "$DB_DIR/issues.jsonl" >/dev/null 2>&1; then
-        echo '{"rows": []}' > "$DB_DIR/issues.jsonl"
     fi
 
     # Export supplemental tables (best-effort).

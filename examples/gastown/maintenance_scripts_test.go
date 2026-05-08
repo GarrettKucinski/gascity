@@ -4478,6 +4478,73 @@ func TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay(t *testing.T) 
 	}
 }
 
+// Dolt returns the bare empty object `{}` for a SELECT that matched zero
+// rows — the canonical empty form for a freshly registered rig before its
+// first issue is filed. The export pipeline must accept that form and write
+// the canonical `{"rows": []}` shape into the archive, without softening the
+// empty-file / malformed-JSON failure signals exercised by the three
+// `*DoesNotCommitBrokenOutputs` tests below.
+func TestJsonlExportDoltEmptyObjectCanonicalizesAtConsumerBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scrub string
+	}{
+		{name: "ScrubFalse", scrub: "false"},
+		{name: "ScrubTrue", scrub: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+			archiveRepo := filepath.Join(cityDir, "archive")
+
+			prevHead := initSeedArchive(t, archiveRepo, 3)
+			writeIssuesPayloadDoltStub(t, binDir, `{}`)
+			writeJsonlExportGCStub(t, binDir)
+
+			env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+			env["GC_JSONL_SCRUB"] = tc.scrub
+
+			runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+			revOut, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
+			if err != nil {
+				t.Fatalf("git rev-parse: %v\n%s", err, revOut)
+			}
+			if newHead := strings.TrimSpace(string(revOut)); newHead == prevHead {
+				t.Fatalf("dolt empty-object export must advance HEAD (export succeeded): still at %s", newHead)
+			}
+
+			exported, err := os.ReadFile(filepath.Join(archiveRepo, "beads", "issues.jsonl"))
+			if err != nil {
+				t.Fatalf("ReadFile(issues.jsonl): %v", err)
+			}
+			var payload struct {
+				Rows []json.RawMessage `json:"rows"`
+			}
+			if err := json.Unmarshal(exported, &payload); err != nil {
+				t.Fatalf("archive must be canonical JSON, got %q: %v", exported, err)
+			}
+			if payload.Rows == nil {
+				t.Fatalf("archive must contain a rows array (canonical empty form), got %q", exported)
+			}
+			if len(payload.Rows) != 0 {
+				t.Fatalf("expected zero rows from empty dolt export, got %d:\n%s", len(payload.Rows), exported)
+			}
+
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), "failed: beads ") {
+				t.Fatalf("dolt empty-object export must not be reported as a failed db, got:\n%s", gcData)
+			}
+		})
+	}
+}
+
 func TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
