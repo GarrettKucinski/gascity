@@ -548,6 +548,13 @@ while IFS= read -r DB; do
         continue
     fi
 
+    # Normalize dolt's empty-result form ({}) to canonical {"rows": []} so the
+    # downstream scrub/validate/count chain sees a consistent shape regardless
+    # of whether the query returned zero or N rows.
+    if ! jq -e 'has("rows")' "$DB_DIR/issues.jsonl" >/dev/null 2>&1; then
+        echo '{"rows": []}' > "$DB_DIR/issues.jsonl"
+    fi
+
     # Export supplemental tables (best-effort).
     for TABLE in comments config dependencies labels metadata; do
         dolt_sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
