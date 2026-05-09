@@ -2137,6 +2137,10 @@ func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
 			v := adjustFragmentPath(*p.OverlayDir, topoDir, cityRoot)
 			p.OverlayDir = &v
 		}
+		if p.Namepool != nil && *p.Namepool != "" {
+			v := adjustFragmentPath(*p.Namepool, topoDir, cityRoot)
+			p.Namepool = &v
+		}
 	}
 }
 
@@ -2390,6 +2394,11 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if ov.OverlayDir != nil {
 		a.OverlayDir = *ov.OverlayDir
+	}
+	if ov.Namepool != nil {
+		a.Namepool = *ov.Namepool
+		// Clear cached names so loadNamepools re-reads from the new path.
+		a.NamepoolNames = nil
 	}
 	if ov.DefaultSlingFormula != nil {
 		a.DefaultSlingFormula = ov.DefaultSlingFormula

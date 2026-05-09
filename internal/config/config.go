@@ -568,6 +568,12 @@ type AgentOverride struct {
 	// additively into the agent's working directory at startup.
 	// Relative paths resolve against the city directory.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
+	// Namepool overrides the agent's namepool path. Relative paths resolve
+	// against the declaring config file's directory; absolute and "//"-
+	// prefixed paths resolve against the city root. Useful for giving each
+	// rig its own themed name list while keeping a single shared pack source.
+	// Example: namepool = ".gc/configs/integrate-app-polecat-names.txt"
+	Namepool *string `toml:"namepool,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments overrides the agent's inject_fragments list.

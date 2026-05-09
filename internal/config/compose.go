@@ -608,11 +608,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
-		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
-			continue
+		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
+			v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
+			p.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
-		p.SessionSetupScript = &v
+		if p.Namepool != nil && *p.Namepool != "" {
+			v := adjustFragmentPath(*p.Namepool, declDir, cityRoot)
+			p.Namepool = &v
+		}
 	}
 }
 
@@ -630,11 +633,14 @@ func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
 func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
 	for i := range overrides {
 		ov := &overrides[i]
-		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
-			continue
+		if ov.SessionSetupScript != nil && *ov.SessionSetupScript != "" {
+			v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+			ov.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
-		ov.SessionSetupScript = &v
+		if ov.Namepool != nil && *ov.Namepool != "" {
+			v := adjustFragmentPath(*ov.Namepool, declDir, cityRoot)
+			ov.Namepool = &v
+		}
 	}
 }
 
