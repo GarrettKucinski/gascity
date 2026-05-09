@@ -1487,6 +1487,107 @@ func TestAdjustAgentPaths_OverlayDirAdjusted(t *testing.T) {
 	}
 }
 
+// TestLoadWithIncludes_RigPatchNamepoolOverridePerRig verifies that two rigs
+// can override the same pack-defined polecat agent's namepool independently
+// via [[rigs.patches]]. Each rig gets its own NamepoolNames list, and a third
+// rig with no override inherits the pack's default namepool (resolved via
+// agent-convention discovery from packs/base/agents/polecat/namepool.txt).
+func TestLoadWithIncludes_RigPatchNamepoolOverridePerRig(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city/packs/base/agents/polecat"] = true
+	fs.Files["/city/packs/base/pack.toml"] = []byte(`
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+max_active_sessions = 4
+`)
+	fs.Files["/city/packs/base/agents/polecat/namepool.txt"] = []byte("Furiosa\nMax\nImmortan\n")
+	fs.Files["/city/configs/integrate-app-polecat-names.txt"] = []byte("Athena\nApollo\nHermes\n")
+	fs.Files["/city/configs/ai-platform-polecat-names.txt"] = []byte("Loki\nThor\nFreya\n")
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "integrate-app"
+path = "/repo/integrate-app"
+includes = ["packs/base"]
+
+  [[rigs.patches]]
+  agent = "polecat"
+  namepool = "configs/integrate-app-polecat-names.txt"
+
+[[rigs]]
+name = "ai-platform"
+path = "/repo/ai-platform"
+includes = ["packs/base"]
+
+  [[rigs.patches]]
+  agent = "polecat"
+  namepool = "configs/ai-platform-polecat-names.txt"
+
+[[rigs]]
+name = "default-themed"
+path = "/repo/default"
+includes = ["packs/base"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	byRig := make(map[string]*Agent)
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name != "polecat" {
+			continue
+		}
+		byRig[a.Dir] = a
+	}
+
+	cases := []struct {
+		rig      string
+		wantPath string
+		wantList []string
+	}{
+		{
+			rig:      "integrate-app",
+			wantPath: "configs/integrate-app-polecat-names.txt",
+			wantList: []string{"Athena", "Apollo", "Hermes"},
+		},
+		{
+			rig:      "ai-platform",
+			wantPath: "configs/ai-platform-polecat-names.txt",
+			wantList: []string{"Loki", "Thor", "Freya"},
+		},
+		{
+			// No override: convention discovery resolves the absolute path
+			// to the pack-local namepool file.
+			rig:      "default-themed",
+			wantPath: "/city/packs/base/agents/polecat/namepool.txt",
+			wantList: []string{"Furiosa", "Max", "Immortan"},
+		},
+	}
+
+	for _, tc := range cases {
+		a, ok := byRig[tc.rig]
+		if !ok {
+			t.Fatalf("polecat agent for rig %q not found in expanded config", tc.rig)
+		}
+		if a.Namepool != tc.wantPath {
+			t.Errorf("rig %q: agent.Namepool = %q, want %q", tc.rig, a.Namepool, tc.wantPath)
+		}
+		if !reflect.DeepEqual(a.NamepoolNames, tc.wantList) {
+			t.Errorf("rig %q: agent.NamepoolNames = %v, want %v", tc.rig, a.NamepoolNames, tc.wantList)
+		}
+	}
+}
+
 func TestLoadWithIncludes_MultipleCityPacks(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/packs/alpha/pack.toml"] = []byte(`

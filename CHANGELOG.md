@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `[[rigs.patches]]` and `[[rigs.overrides]]` now support a `namepool` field
+  to override an agent's name list per rig. Use it to give each rig's
+  polecat pool a distinct theme (e.g., Mad Max for one rig, Greek mythology
+  for another) while keeping a single shared pack source. The override is
+  opt-in: rigs without the field continue to inherit the pack's default
+  namepool.
+
 ### Fixed
 
 - The built-in `control-dispatcher` trace now defaults to
