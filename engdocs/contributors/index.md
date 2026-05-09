@@ -12,6 +12,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Reconciler Debugging](reconciler-debugging.md)
 - [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
   OpenAPI generation, or SSE registration
+- [Built-in Pack Lifecycle](builtin-packs.md) when touching anything
+  under `.gc/system/packs/` or `examples/<...>/packs/<name>/`
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
