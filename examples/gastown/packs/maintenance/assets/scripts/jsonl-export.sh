@@ -326,7 +326,7 @@ push_archive_main() {
         set_consecutive_push_failures "$consecutive"
         set_pending_archive_push
 
-        if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ]; then
+        if [ "$consecutive" -eq "$MAX_PUSH_FAILURES" ]; then
             gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
                 -m "Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)" \
                 2>/dev/null || true
@@ -334,6 +334,15 @@ push_archive_main() {
 
         return 1
     }
+
+    # Local-only archives are a supported configuration — push is opt-in via
+    # `git remote add`. Without a remote, return success and reset counters so
+    # a later remote-add starts clean.
+    if [ -z "$(git remote 2>/dev/null)" ]; then
+        set_consecutive_push_failures "0"
+        clear_pending_archive_push
+        return 0
+    fi
 
     if ! refresh_archive_remote_main; then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then

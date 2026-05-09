@@ -4529,9 +4529,15 @@ func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchive(t, archiveRepo, 3)
+	// Configure a remote and then break it: this test asserts the
+	// counter-recovery path on push failure, which requires `git remote` to
+	// return non-empty so the local-only success short-circuit does not fire.
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
+	if err := os.RemoveAll(remoteRepo); err != nil {
+		t.Fatalf("RemoveAll(remoteRepo): %v", err)
+	}
 
 	if err := os.WriteFile(stateFile, []byte("not-json\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(state file): %v", err)
@@ -4563,9 +4569,15 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchive(t, archiveRepo, 3)
+	// See note in TestJsonlExportPushFailureRecoversFromMalformedState: a
+	// configured-then-broken remote is required so the no-remote success path
+	// does not preempt the push-failure assertion under test here.
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
+	if err := os.RemoveAll(remoteRepo); err != nil {
+		t.Fatalf("RemoveAll(remoteRepo): %v", err)
+	}
 
 	if err := os.WriteFile(stateFile, []byte("[]\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(state file): %v", err)
@@ -4795,6 +4807,174 @@ func TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts(t *testing.T) 
 	}
 	if _, ok := pendingAlerts["beads"]; !ok {
 		t.Fatalf("expected new pending alert to be added, got:\n%s", stateData)
+	}
+}
+
+// TestJsonlExportNoRemoteIsTreatedAsSuccess covers the local-only archive case:
+// when the archive repo has no git remote configured, the script must NOT treat
+// it as a push failure. It should return success silently with zero counter and
+// no escalation mail. Reproduces the misconfiguration that produced 100+
+// duplicate "JSONL push failed" mails from a single missing-remote condition.
+func TestJsonlExportNoRemoteIsTreatedAsSuccess(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	// initSeedArchive creates a local-only repo (no `git remote add`).
+	initSeedArchive(t, archiveRepo, 10)
+	writeMultiRecordDoltStub(t, binDir, 11) // 10% delta — below default 20% spike threshold
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"]; ok && got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0 (no-remote must not increment failure counter)\nstate: %s", got, stateData)
+	}
+	if got, ok := state["pending_archive_push"]; ok && got == true {
+		t.Fatalf("pending_archive_push = %v, want absent (no-remote must clear pending state)\nstate: %s", got, stateData)
+	}
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if strings.Contains(string(mailData), "ESCALATION: JSONL push failed") {
+		t.Fatalf("no-remote case must not escalate; mail log:\n%s", mailData)
+	}
+
+	// Sanity: the script must have actually run (commit must exist in the
+	// archive). Otherwise the no-mail / zero-counter assertions could pass
+	// vacuously if a precondition regression caused the script to exit early.
+	logOut, err := exec.Command("git", "-C", archiveRepo, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log: %v\n%s", err, logOut)
+	}
+	if commits := strings.Count(string(logOut), "\n"); commits < 2 {
+		t.Fatalf("expected at least the seed commit + a new export commit; got %d:\n%s", commits, logOut)
+	}
+}
+
+// TestJsonlExportNoRemoteResetsStuckFailureCounter ensures that when an older
+// (buggy) version of the script left the state file with a high
+// consecutive_push_failures counter, the no-remote success path resets it to
+// zero so a later `git remote add` starts clean rather than already past the
+// escalation threshold.
+func TestJsonlExportNoRemoteResetsStuckFailureCounter(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 10)
+	writeMultiRecordDoltStub(t, binDir, 11)
+	writeJsonlExportGCStub(t, binDir)
+
+	// Simulate the stuck state from the prior buggy version: high counter and
+	// pending_archive_push true, with no remote ever configured.
+	if err := os.WriteFile(stateFile, []byte(`{"consecutive_push_failures":42,"pending_archive_push":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0 (no-remote run must reset stuck counter)\nstate: %s", got, stateData)
+	}
+	if got, ok := state["pending_archive_push"]; ok && got == true {
+		t.Fatalf("pending_archive_push = %v, want absent (no-remote run must clear pending flag)\nstate: %s", got, stateData)
+	}
+}
+
+// TestJsonlExportPushFailureEscalatesOnceAtThreshold verifies the escalation
+// alert fires exactly once when the failure counter crosses
+// MAX_PUSH_FAILURES, not on every cycle past it. The prior buggy guard used
+// `-ge` instead of `-eq`, so a single stuck condition produced an unbounded
+// stream of identical "JSONL push failed" mails (observed: 121 escalations
+// from one local-only archive over ~30h before remediation).
+func TestJsonlExportPushFailureEscalatesOnceAtThreshold(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	// Set up a working remote (so the no-remote success path is NOT taken),
+	// then break the remote so subsequent push attempts fail. The local
+	// tracking ref to origin/main remains, which is what drives the script
+	// into the failure-counter path.
+	remoteRepo, _ := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100) // matches seed count — no spike
+	writeJsonlExportGCStub(t, binDir)
+	if err := os.RemoveAll(remoteRepo); err != nil {
+		t.Fatalf("RemoveAll(remoteRepo): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MAX_PUSH_FAILURES"] = "3"
+
+	// Run more times than the threshold so we'd see a flood under the old
+	// `-ge` behavior (alerts at runs 3, 4, 5 — i.e. 3 escalations across
+	// these 5 runs). Under the `-eq` fix, exactly one alert fires.
+	const totalRuns = 5
+	for i := 0; i < totalRuns; i++ {
+		runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	}
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	pushFailedAlerts := strings.Count(string(mailData), "ESCALATION: JSONL push failed")
+	if pushFailedAlerts != 1 {
+		t.Fatalf("expected exactly 1 push-failure escalation across %d runs, got %d\nmail log:\n%s", totalRuns, pushFailedAlerts, mailData)
+	}
+
+	// Sanity: the counter must have actually crossed the threshold so the
+	// "exactly one" assertion above isn't satisfied vacuously by a path that
+	// never reaches the alert guard at all.
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	counter, ok := state["consecutive_push_failures"].(float64)
+	if !ok {
+		t.Fatalf("consecutive_push_failures missing or wrong type:\n%s", stateData)
+	}
+	if int(counter) < 3 {
+		t.Fatalf("expected counter to reach at least the threshold (3) so the alert guard was actually exercised, got %d\nstate: %s", int(counter), stateData)
 	}
 }
 

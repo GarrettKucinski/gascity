@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `jsonl-export.sh` no longer treats a missing git remote on the JSONL archive
+  as a push failure. Local-only archives are now a first-class supported
+  configuration: when no remote is configured the script returns success and
+  resets the failure counter so a later `git remote add` starts clean. Also
+  changes the escalation guard from `-ge` to `-eq` so a stuck push condition
+  fires one `ESCALATION: JSONL push failed` mail at threshold instead of one
+  per cooldown thereafter — the prior behavior produced 100+ duplicate
+  escalations from a single misconfiguration.
 - The built-in `control-dispatcher` trace now defaults to
   `${GC_CITY_RUNTIME_DIR}/control-dispatcher-trace.log` (falling back to
   `${GC_CITY}/.gc/runtime/control-dispatcher-trace.log`) instead of writing at
