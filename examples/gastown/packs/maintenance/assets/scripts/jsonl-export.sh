@@ -158,6 +158,109 @@ set_consecutive_push_failures() {
     write_state_json "$(read_state_json | jq -c --argjson count "$count" '.consecutive_push_failures = $count')"
 }
 
+# Reset stale consecutive_push_failures when the archive is in local-only
+# mode. The counter is incremented only via push attempts that don't
+# happen in this mode, so any non-zero value is residue from a prior
+# push-mode era. log_archive_mode_if_needed only clears on the
+# push→local-only transition; this helper covers the steady-state case
+# where a stale counter persists across many runs and would otherwise
+# trigger a premature HIGH escalation the first time origin returns.
+# (gastownhall/gascity#ga-c4t)
+clear_stale_counter_if_local_only() {
+    local current_mode
+    local consecutive
+
+    current_mode=$(get_archive_mode)
+    if [ "$current_mode" != "local-only" ]; then
+        return 0
+    fi
+
+    consecutive=$(read_state_json | jq -r '.consecutive_push_failures // 0')
+    case "$consecutive" in
+        ''|0|*[!0-9]*)
+            return 0
+            ;;
+    esac
+
+    set_consecutive_push_failures "0"
+    echo "jsonl-export: cleared stale consecutive_push_failures=$consecutive (archive in local-only mode; counter is meaningless without push attempts)" >&2
+}
+
+# Per-DB failure tracking. record_db_failure_reason captures the
+# dolt-side stderr from each failed per-DB export and surfaces it on
+# script stderr; emit_failure_pattern_summary then identifies a
+# dominant root cause when at least half of the failed DBs share it
+# (commonly: dolt server unreachable for the whole run). The original
+# 2>/dev/null behavior swallowed dolt errors, making 0/N export
+# cascades opaque. (gastownhall/gascity#ga-c4t)
+FAILED_DB_REASONS_FILE=""
+
+init_failure_tracking() {
+    FAILED_DB_REASONS_FILE=$(mktemp "${TMPDIR:-/tmp}/jsonl-export-failures.XXXXXX")
+    # Cleanup is a single trap because the script has no other EXIT
+    # trap installed; revisit if that ever changes.
+    # shellcheck disable=SC2064  # expand FAILED_DB_REASONS_FILE at trap time, not at install time
+    trap "rm -f \"$FAILED_DB_REASONS_FILE\"" EXIT
+}
+
+record_db_failure_reason() {
+    local db="$1"
+    local err_file="$2"
+    local reason=""
+
+    if [ -s "$err_file" ]; then
+        reason=$(tail -n 5 "$err_file" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+    fi
+    if [ -z "$reason" ]; then
+        reason="(no stderr captured)"
+    fi
+    if [ -n "$FAILED_DB_REASONS_FILE" ]; then
+        printf '%s\t%s\n' "$db" "$reason" >> "$FAILED_DB_REASONS_FILE"
+    fi
+    echo "jsonl-export: dolt query failed for db=$db: $reason" >&2
+}
+
+emit_failure_pattern_summary() {
+    [ -n "$FAILED_DB_REASONS_FILE" ] || return 0
+    [ -s "$FAILED_DB_REASONS_FILE" ] || return 0
+
+    local total
+    total=$(wc -l < "$FAILED_DB_REASONS_FILE" | tr -d '[:space:]')
+    if [ "$total" -lt 2 ]; then
+        return 0
+    fi
+
+    # Find the dominant failure reason in a single awk pass: count
+    # occurrences of each reason in column 2 (tab-separated), then emit
+    # the top entry as "<count>\t<reason>". One awk avoids the SIGPIPE
+    # interactions a sort/uniq/head pipeline can hit under pipefail when
+    # head closes its stdin early.
+    local top_line dominant_count dominant_reason
+    top_line=$(awk -F'\t' '
+        { count[$2]++ }
+        END {
+            best_n = 0
+            best_r = ""
+            for (r in count) {
+                if (count[r] > best_n) {
+                    best_n = count[r]
+                    best_r = r
+                }
+            }
+            printf "%d\t%s", best_n, best_r
+        }
+    ' "$FAILED_DB_REASONS_FILE")
+    dominant_count=$(printf '%s' "$top_line" | cut -f1)
+    dominant_reason=$(printf '%s' "$top_line" | cut -f2-)
+
+    # Surface only when at least half of failures share the same root
+    # cause. Below that, calling out a single dominant reason would
+    # mislead operators about scattered per-DB issues.
+    if [ "$dominant_count" -ge $(( (total + 1) / 2 )) ]; then
+        echo "jsonl-export: $dominant_count of $total failed DBs share root cause: $dominant_reason" >&2
+    fi
+}
+
 set_pending_archive_push() {
     write_state_json "$(read_state_json | jq -c '.pending_archive_push = true')"
 }
@@ -549,7 +652,9 @@ fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
 mkdir -p "$(dirname "$STATE_FILE")"
 
+init_failure_tracking
 log_archive_mode_if_needed
+clear_stale_counter_if_local_only
 retry_pending_spike_alert
 
 is_user_database() {
@@ -658,16 +763,22 @@ while IFS= read -r DB; do
     DB_DIR="$ARCHIVE_REPO/$DB"
     mkdir -p "$DB_DIR"
 
-    # Step 1: Export issues table.
+    # Step 1: Export issues table. Capture stderr to a per-DB temp file so
+    # a failed dolt query surfaces its error message instead of being
+    # silently swallowed; the original 2>/dev/null made 0/N cascades
+    # opaque (gastownhall/gascity#ga-c4t).
     ISSUE_EXPORT_TMP=$(mktemp "$DB_DIR/issues.jsonl.tmp.XXXXXX")
-    if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
-        rm -f "$ISSUE_EXPORT_TMP"
+    ISSUE_EXPORT_ERR=$(mktemp "$DB_DIR/issues.jsonl.err.XXXXXX")
+    if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>"$ISSUE_EXPORT_ERR"; then
+        record_db_failure_reason "$DB" "$ISSUE_EXPORT_ERR"
+        rm -f "$ISSUE_EXPORT_TMP" "$ISSUE_EXPORT_ERR"
         discard_failed_db_outputs "$DB"
         FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
         FAILED_DBS="${FAILED_DBS}$DB
 "
         continue
     fi
+    rm -f "$ISSUE_EXPORT_ERR"
     if ! mv -f "$ISSUE_EXPORT_TMP" "$DB_DIR/issues.jsonl"; then
         rm -f "$ISSUE_EXPORT_TMP"
         discard_failed_db_outputs "$DB"
@@ -770,6 +881,8 @@ while IFS= read -r DB; do
 done <<EOF
 $DATABASES
 EOF
+
+emit_failure_pattern_summary
 
 cd "$ARCHIVE_REPO"
 if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
