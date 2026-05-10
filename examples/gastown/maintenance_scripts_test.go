@@ -5110,6 +5110,205 @@ func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
 	return binDir, bdLog, env
 }
 
+// writeMultiDBExportFailureDoltStub emits a `dolt` shim that returns a fixed
+// list of databases from SHOW DATABASES, reports every database as having a
+// wisps table, and fails every issues SELECT with a configurable stderr
+// message. This drives the 0/N cascade test path: the original
+// 2>/dev/null in jsonl-export.sh swallowed dolt's stderr, which made the
+// production "exported 0/8 root cause unknown" failure mode opaque
+// (gastownhall/gascity#ga-c4t).
+func writeMultiDBExportFailureDoltStub(t *testing.T, binDir string, dbs []string, errMsg string) {
+	t.Helper()
+	dbList := strings.Join(dbs, "\\n")
+	body := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
+		"  *\"SHOW DATABASES\"*)\n" +
+		"    printf 'Database\\n" + dbList + "\\n'\n" +
+		"    ;;\n" +
+		"  *\".issues\"*)\n" +
+		"    echo '" + errMsg + "' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  *\"SELECT *\"*)\n" +
+		"    printf '{\"rows\":[]}\\n'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeExecutable(t, filepath.Join(binDir, "dolt"), body)
+}
+
+// TestJsonlExportPerDBFailureSurfacesDoltError verifies that when a per-DB
+// dolt query fails, the captured stderr is propagated to the script's
+// stderr (visible in wisp logs) instead of silently swallowed. Before
+// gastownhall/gascity#ga-c4t this was hidden by `2>/dev/null` and made
+// the intermittent 0/N cascade impossible to diagnose from logs alone.
+func TestJsonlExportPerDBFailureSurfacesDoltError(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	writeIssuesExportFailureDoltStub(t, binDir)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	// The per-DB stub returns "simulated issues export failure" on stderr
+	// for every issues SELECT. The fix must surface that text and tag it
+	// with the offending DB so an operator scanning logs can identify the
+	// failing query class without rerunning anything.
+	output := string(out)
+	if !strings.Contains(output, "simulated issues export failure") {
+		t.Fatalf("expected dolt stderr to be surfaced in script output\noutput:\n%s", output)
+	}
+	if !strings.Contains(output, "dolt query failed for db=beads") {
+		t.Fatalf("expected per-DB failure line tagged with db name\noutput:\n%s", output)
+	}
+}
+
+// TestJsonlExportAllDBsSharingErrorEmitsCoalescedSummary covers the
+// production 0/8 cascade: every DB fails with the same dolt-side error
+// (e.g. server unreachable). The fix must emit a single
+// "X of N failed DBs share root cause: <error>" summary so the dominant
+// cause is visible at a glance even when the failed-DB list is long.
+// (gastownhall/gascity#ga-c4t)
+func TestJsonlExportAllDBsSharingErrorEmitsCoalescedSummary(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	dbs := []string{"ap", "crd", "dp", "emb", "ga", "hq", "ia", "nxs"}
+	const sharedErr = "Error 1105 (HY000): connection refused"
+	writeMultiDBExportFailureDoltStub(t, binDir, dbs, sharedErr)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	output := string(out)
+	// All 8 DBs must appear in the per-DB failure stream so each one is
+	// individually attributable.
+	for _, db := range dbs {
+		if !strings.Contains(output, "dolt query failed for db="+db) {
+			t.Errorf("missing per-DB failure line for db=%s\noutput:\n%s", db, output)
+		}
+	}
+	// A coalesced summary must be emitted because all 8 DBs share the
+	// same root cause. Operators reading the wisp log should see the
+	// pattern at a glance instead of inferring it from 8 separate
+	// failure entries.
+	wantSummary := "8 of 8 failed DBs share root cause:"
+	if !strings.Contains(output, wantSummary) {
+		t.Fatalf("expected coalesced summary %q in script output\noutput:\n%s", wantSummary, output)
+	}
+	if !strings.Contains(output, sharedErr) {
+		t.Fatalf("coalesced summary must include the shared error text %q\noutput:\n%s", sharedErr, output)
+	}
+}
+
+// TestJsonlExportSteadyStateLocalOnlyClearsStaleCounter covers the bug
+// observed in production where consecutive_push_failures was stuck at
+// 37 with last_logged_mode already "local-only" (the
+// log_archive_mode_if_needed transition had already fired hours
+// earlier, but somehow the counter was still non-zero — possibly via
+// transient mode flicker). Because subsequent runs in steady-state
+// local-only no longer take the transition path, the existing reset
+// never re-fires and the threshold-based escalation keeps firing on
+// stale data. The fix clears the counter on every run while in
+// local-only mode if it's non-zero, independent of transitions.
+// (gastownhall/gascity#ga-c4t)
+func TestJsonlExportSteadyStateLocalOnlyClearsStaleCounter(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	// Seed the state the script saw in production: archive is in
+	// local-only mode (no remote on the seed archive), the transition
+	// to local-only was already logged earlier, but consecutive_push_failures
+	// is non-zero. last_logged_at must be RECENT (well inside the
+	// 7-day weekly re-log window) so log_archive_mode_if_needed
+	// short-circuits its should_log path — that's exactly the
+	// production state where the existing transition reset never
+	// re-fires and the counter would otherwise stay stuck.
+	recentAt := time.Now().UTC().Add(-30 * time.Minute).Format("2006-01-02T15:04:05Z")
+	priorState := fmt.Sprintf(`{"last_logged_mode":"local-only","last_logged_at":%q,"consecutive_push_failures":37,"pending_archive_push":true}`+"\n", recentAt)
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+	// Push a record count above MIN_PREV_FOR_SPIKE so the spike check
+	// doesn't HALT this run (seed has 3 rows, stub returns 5, default
+	// floor is 10; we want to exercise the normal commit path).
+	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	// The clear should announce itself so operators can see why the
+	// counter dropped. Without this log the reset would be invisible.
+	if !strings.Contains(string(out), "cleared stale consecutive_push_failures=37") {
+		t.Fatalf("expected stale-counter clear announcement in script output\noutput:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 0 {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+
+	// pending_archive_push must remain true — local commits still need
+	// to be pushed when origin returns. Counter reset is independent
+	// of pending-push tracking.
+	if got, ok := state["pending_archive_push"].(bool); !ok || !got {
+		t.Fatalf("pending_archive_push must remain true after counter reset\nstate: %s", stateData)
+	}
+
+	// No HIGH escalation should have fired for the stale counter
+	// itself. The reset is a silent maintenance action.
+	mailData, _ := os.ReadFile(mailLog)
+	if strings.Contains(string(mailData), "ESCALATION: JSONL push failed [HIGH]") {
+		t.Fatalf("counter reset must not escalate; mail log:\n%s", mailData)
+	}
+}
+
 func TestGateSweepInvokesTimerAndGhGateChecks(t *testing.T) {
 	binDir, bdLog, env := gateSweepEnv(t)
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
