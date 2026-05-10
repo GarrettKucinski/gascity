@@ -1982,6 +1982,7 @@ export interface components {
             /** Format: int64 */
             MinActiveSessions: number | null;
             Name: string;
+            Namepool: string | null;
             Nudge: string | null;
             OptionDefaults: {
                 [key: string]: string;

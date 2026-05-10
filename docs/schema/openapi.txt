@@ -287,6 +287,12 @@
           "Name": {
             "type": "string"
           },
+          "Namepool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Nudge": {
             "type": [
               "string",
@@ -481,6 +487,7 @@
           "SessionSetupScript",
           "SessionLive",
           "OverlayDir",
+          "Namepool",
           "DefaultSlingFormula",
           "InjectFragments",
           "AppendFragments",

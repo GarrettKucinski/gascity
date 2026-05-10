@@ -493,6 +493,10 @@
           "type": "string",
           "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
         },
+        "namepool": {
+          "type": "string",
+          "description": "Namepool overrides the agent's namepool path. Relative paths resolve\nagainst the declaring config file's directory; absolute and \"//\"-\nprefixed paths resolve against the city root. Useful for giving each\nrig its own themed name list while keeping a single shared pack source.\nExample: namepool = \".gc/configs/integrate-app-polecat-names.txt\""
+        },
         "default_sling_formula": {
           "type": "string",
           "description": "DefaultSlingFormula overrides the default sling formula."
@@ -749,6 +753,10 @@
         "overlay_dir": {
           "type": "string",
           "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
+        },
+        "namepool": {
+          "type": "string",
+          "description": "Namepool overrides the agent's namepool path. Relative paths resolve\nagainst the declaring config file's directory; absolute and \"//\"-\nprefixed paths resolve against the city root. Useful for giving each\nrig its own themed name list while keeping a single shared pack source.\nExample: namepool = \".gc/configs/integrate-app-polecat-names.txt\""
         },
         "default_sling_formula": {
           "type": "string",

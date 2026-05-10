@@ -158,6 +158,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
 | `overlay_dir` | string |  |  | OverlayDir overrides the agent's overlay_dir path. Copies contents additively into the agent's working directory at startup. Relative paths resolve against the city directory. |
+| `namepool` | string |  |  | Namepool overrides the agent's namepool path. Relative paths resolve against the declaring config file's directory; absolute and "//"- prefixed paths resolve against the city root. Useful for giving each rig its own themed name list while keeping a single shared pack source. Example: namepool = ".gc/configs/integrate-app-polecat-names.txt" |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula overrides the default sling formula. |
 | `inject_fragments` | []string |  |  | InjectFragments overrides the agent's inject_fragments list. |
 | `append_fragments` | []string |  |  | AppendFragments appends named template fragments to this agent's rendered prompt. It is the V2 spelling for per-agent fragment selection. |
@@ -210,6 +211,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `session_setup_script` | string |  |  | SessionSetupScript overrides the agent's session_setup_script path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session_live` | []string |  |  | SessionLive overrides the agent's session_live commands. |
 | `overlay_dir` | string |  |  | OverlayDir overrides the agent's overlay_dir path. Copies contents additively into the agent's working directory at startup. Relative paths resolve against the city directory. |
+| `namepool` | string |  |  | Namepool overrides the agent's namepool path. Relative paths resolve against the declaring config file's directory; absolute and "//"- prefixed paths resolve against the city root. Useful for giving each rig its own themed name list while keeping a single shared pack source. Example: namepool = ".gc/configs/integrate-app-polecat-names.txt" |
 | `default_sling_formula` | string |  |  | DefaultSlingFormula overrides the default sling formula. |
 | `inject_fragments` | []string |  |  | InjectFragments overrides the agent's inject_fragments list. |
 | `append_fragments` | []string |  |  | AppendFragments overrides the agent's append_fragments list. |

@@ -79,6 +79,7 @@ export type AgentPatch = {
     MaxActiveSessions: number | null;
     MinActiveSessions: number | null;
     Name: string;
+    Namepool: string | null;
     Nudge: string | null;
     OptionDefaults: {
         [key: string]: string;
