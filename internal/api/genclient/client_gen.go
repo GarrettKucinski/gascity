@@ -315,6 +315,7 @@ type AgentPatch struct {
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
 	WakeMode                *string           `json:"WakeMode"`
+	WakeOnEscalation        *bool             `json:"WakeOnEscalation"`
 	WorkDir                 *string           `json:"WorkDir"`
 }
 

@@ -452,6 +452,12 @@
               "null"
             ]
           },
+          "WakeOnEscalation": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "WorkDir": {
             "type": [
               "string",
@@ -495,6 +501,7 @@
           "DependsOn",
           "ResumeCommand",
           "WakeMode",
+          "WakeOnEscalation",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",

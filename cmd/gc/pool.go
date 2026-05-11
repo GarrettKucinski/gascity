@@ -377,6 +377,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.Attach
 		dst.Attach = &v
 	}
+	if src.WakeOnEscalation != nil {
+		v := *src.WakeOnEscalation
+		dst.WakeOnEscalation = &v
+	}
 	if src.MaxActiveSessions != nil {
 		v := *src.MaxActiveSessions
 		dst.MaxActiveSessions = &v

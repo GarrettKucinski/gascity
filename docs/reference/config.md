@@ -111,6 +111,7 @@ Agent defines a configured agent in the city.
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
+| `wake_on_escalation` | boolean |  |  | WakeOnEscalation opts this agent in to wake-on-mail: incoming messages whose subject matches an escalation keyword (see [mail].escalation_keywords) auto-nudge the agent's session even when the sender did not pass --notify. Defaults to false. The canonical case is the Mayor agent, which is the human operator's control plane and must surface escalations without polling. |
 
 ## AgentDefaults
 
@@ -172,6 +173,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
+| `wake_on_escalation` | boolean |  |  | WakeOnEscalation overrides the agent's wake_on_escalation flag. |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
@@ -219,6 +221,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
+| `wake_on_escalation` | boolean |  |  | WakeOnEscalation overrides the agent's wake_on_escalation flag. |
 | `pre_start_append` | []string |  |  | PreStartAppend appends commands to the agent's pre_start list (instead of replacing). Applied after PreStart if both are set. |
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
@@ -348,6 +351,7 @@ MailConfig holds mail provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
+| `escalation_keywords` | []string |  |  | EscalationKeywords overrides the built-in keyword list used to recognize escalation subjects for wake-on-escalation. When empty, mail.DefaultEscalationKeywords is used. Matching is case-insensitive and whole-word; see internal/mail/escalation.go for semantics. |
 
 ## ModelPricing
 

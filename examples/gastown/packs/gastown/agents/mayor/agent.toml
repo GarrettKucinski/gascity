@@ -4,3 +4,9 @@ work_dir = ".gc/agents/mayor"
 nudge = "Check mail and hook status, then act accordingly."
 idle_timeout = "1h"
 max_active_sessions = 1
+# Auto-wake on escalation mail (ga-ltvwp): a dormant Mayor session is
+# nudged immediately when a message whose subject matches an escalation
+# keyword arrives, instead of waiting until the operator's next prompt.
+# See [mail].escalation_keywords for the keyword list (defaults live in
+# internal/mail/escalation.go).
+wake_on_escalation = true

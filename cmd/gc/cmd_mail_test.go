@@ -1412,7 +1412,7 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
 	var nudged string
-	nf := func(recipient string) error {
+	nf := func(recipient, _ string) error {
 		nudged = recipient
 		return nil
 	}
@@ -1435,7 +1435,7 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -2151,7 +2151,7 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var nudged string
-	nf := func(recipient string) error {
+	nf := func(recipient, _ string) error {
 		nudged = recipient
 		return nil
 	}
@@ -2174,7 +2174,7 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -2199,7 +2199,7 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		nudgeCalled = true
 		return nil
 	}
@@ -2854,5 +2854,204 @@ func TestResolveMailIdentityWithConfigCached_SharedCacheSurvivesFallbackMiss(t *
 
 	if store.sessionListCalls != 1 {
 		t.Errorf("broad gc:session List calls = %d, want 1 across listLiveSessionMailboxes + fallback miss resolution", store.sessionListCalls)
+	}
+}
+
+// --- wake-on-escalation (ga-ltvwp) ---
+
+// wakeOnEscalationCfg returns a city config with a single agent named
+// "mayor" that has wake_on_escalation = true. Used by the auto-wake tests.
+func wakeOnEscalationCfg(t *testing.T) *config.City {
+	t.Helper()
+	wake := true
+	return &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", WakeOnEscalation: &wake},
+			{Name: "refinery", Dir: "gascity"},
+		},
+	}
+}
+
+func TestMailRecipientWakesOnSubject_OptedInWithEscalationSubject(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	if !mailRecipientWakesOnSubject(cfg, "mayor", "ESCALATION: refinery diverged") {
+		t.Error("opted-in recipient with escalation subject should wake")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_OptedInButNonEscalationSubject(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	if mailRecipientWakesOnSubject(cfg, "mayor", "WORK_DONE: ga-xyz merged") {
+		t.Error("non-escalation subject should not wake even for opted-in recipient")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_NotOptedIn(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	if mailRecipientWakesOnSubject(cfg, "gascity/refinery", "ESCALATION: test") {
+		t.Error("recipient without wake_on_escalation should not wake (refinery case from ga-ltvwp acceptance)")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_HumanNeverWakes(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	if mailRecipientWakesOnSubject(cfg, "human", "ESCALATION: anything") {
+		t.Error("human pseudo-recipient should never auto-wake")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_NilCfg(t *testing.T) {
+	if mailRecipientWakesOnSubject(nil, "mayor", "ESCALATION: test") {
+		t.Error("nil cfg should never wake")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_UnknownRecipient(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	if mailRecipientWakesOnSubject(cfg, "ghost", "ESCALATION: test") {
+		t.Error("recipient not in cfg should not wake")
+	}
+}
+
+func TestMailRecipientWakesOnSubject_CustomKeywords(t *testing.T) {
+	wake := true
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", Scope: "city", WakeOnEscalation: &wake}},
+		Mail:   config.MailConfig{EscalationKeywords: []string{"PRODUCTION_DOWN"}},
+	}
+	if !mailRecipientWakesOnSubject(cfg, "mayor", "PRODUCTION_DOWN: db unreachable") {
+		t.Error("custom keyword should match")
+	}
+	// Default keywords are NOT used when custom list is set.
+	if mailRecipientWakesOnSubject(cfg, "mayor", "ESCALATION: test") {
+		t.Error("default keyword should not match when custom list is configured")
+	}
+}
+
+func TestFindAgentForMailRecipient_QualifiedNameMatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", BindingName: "gastown"},
+			{Name: "refinery", Dir: "gascity"},
+		},
+	}
+	if a := findAgentForMailRecipient(cfg, "gastown.mayor"); a == nil || a.Name != "mayor" {
+		t.Errorf("findAgentForMailRecipient(gastown.mayor) = %v, want mayor", a)
+	}
+	if a := findAgentForMailRecipient(cfg, "gascity/refinery"); a == nil || a.Name != "refinery" {
+		t.Errorf("findAgentForMailRecipient(gascity/refinery) = %v, want refinery", a)
+	}
+	if a := findAgentForMailRecipient(cfg, "ghost"); a != nil {
+		t.Errorf("findAgentForMailRecipient(ghost) = %v, want nil", a)
+	}
+}
+
+func TestNewMailAutoWakeNudgeFunc_SkipsNonEscalation(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	nf := newMailAutoWakeNudgeFunc(cfg, "human")
+	// Non-escalation subject: returns nil (no nudge attempted) — never
+	// reaches resolveNudgeTarget which would error in a unit test
+	// environment without a city.
+	if err := nf("mayor", "WORK_DONE: ga-xyz"); err != nil {
+		t.Errorf("auto-wake on non-escalation should return nil, got %v", err)
+	}
+}
+
+func TestNewMailAutoWakeNudgeFunc_SkipsOptOutRecipient(t *testing.T) {
+	cfg := wakeOnEscalationCfg(t)
+	nf := newMailAutoWakeNudgeFunc(cfg, "human")
+	if err := nf("gascity/refinery", "ESCALATION: rebase conflict"); err != nil {
+		t.Errorf("auto-wake on opt-out recipient should return nil, got %v", err)
+	}
+}
+
+func TestNewMailAutoWakeNudgeFunc_NilCfgIsHarmless(t *testing.T) {
+	nf := newMailAutoWakeNudgeFunc(nil, "human")
+	if err := nf("mayor", "ESCALATION: test"); err != nil {
+		t.Errorf("auto-wake with nil cfg should return nil, got %v", err)
+	}
+}
+
+func TestDoMailSend_AutoWakeNudgesOptedInRecipient(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	cfg := wakeOnEscalationCfg(t)
+
+	var nudged string
+	var nudgedSubject string
+	// Wrap newMailAutoWakeNudgeFunc with a recording stub to verify the
+	// auto-wake path actually invokes the nudge (instead of hitting the
+	// real resolveNudgeTarget which requires a live city).
+	nf := nudgeFunc(func(recipient, subject string) error {
+		if !mailRecipientWakesOnSubject(cfg, recipient, subject) {
+			return nil
+		}
+		nudged = recipient
+		nudgedSubject = subject
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "gascity/refinery", []string{"mayor", "ESCALATION: ga-c4t diverged", "details"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if nudged != "mayor" {
+		t.Errorf("auto-wake nudge target = %q, want mayor", nudged)
+	}
+	if nudgedSubject != "ESCALATION: ga-c4t diverged" {
+		t.Errorf("auto-wake nudge subject = %q, want escalation", nudgedSubject)
+	}
+}
+
+func TestDoMailSend_AutoWakeSkipsRoutineSubject(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	cfg := wakeOnEscalationCfg(t)
+
+	nudgeCalled := false
+	nf := nudgeFunc(func(recipient, subject string) error {
+		if !mailRecipientWakesOnSubject(cfg, recipient, subject) {
+			return nil
+		}
+		nudgeCalled = true
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "gascity/refinery", []string{"mayor", "WORK_DONE: ga-xyz merged", "details"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if nudgeCalled {
+		t.Error("routine WORK_DONE subject must not trigger auto-wake")
+	}
+}
+
+func TestDoMailSend_AutoWakeSkipsWrongRecipient(t *testing.T) {
+	// ga-ltvwp acceptance: "to=gastown.refinery, subject=ESCALATION → no nudge"
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "gascity/refinery": true}
+	cfg := wakeOnEscalationCfg(t)
+
+	nudgeCalled := false
+	nf := nudgeFunc(func(recipient, subject string) error {
+		if !mailRecipientWakesOnSubject(cfg, recipient, subject) {
+			return nil
+		}
+		nudgeCalled = true
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"gascity/refinery", "ESCALATION: bogus", "body"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if nudgeCalled {
+		t.Error("escalation to non-opted-in recipient (refinery) must not auto-wake")
 	}
 }

@@ -606,6 +606,8 @@ type AgentOverride struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// WakeOnEscalation overrides the agent's wake_on_escalation flag.
+	WakeOnEscalation *bool `toml:"wake_on_escalation,omitempty"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -1103,6 +1105,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+	// EscalationKeywords overrides the built-in keyword list used to
+	// recognize escalation subjects for wake-on-escalation. When empty,
+	// mail.DefaultEscalationKeywords is used. Matching is case-insensitive
+	// and whole-word; see internal/mail/escalation.go for semantics.
+	EscalationKeywords []string `toml:"escalation_keywords,omitempty"`
 }
 
 // EventsConfig holds events provider settings.
@@ -1960,6 +1967,13 @@ type Agent struct {
 	// "resume" (default): reuse provider session key for conversation continuity.
 	// "fresh": start a new provider session on every wake (polecat pattern).
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// WakeOnEscalation opts this agent in to wake-on-mail: incoming
+	// messages whose subject matches an escalation keyword (see
+	// [mail].escalation_keywords) auto-nudge the agent's session even
+	// when the sender did not pass --notify. Defaults to false. The
+	// canonical case is the Mayor agent, which is the human operator's
+	// control plane and must surface escalations without polling.
+	WakeOnEscalation *bool `toml:"wake_on_escalation,omitempty"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`

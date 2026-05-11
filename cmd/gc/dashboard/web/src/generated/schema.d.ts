@@ -2008,6 +2008,7 @@ export interface components {
             StartCommand: string | null;
             Suspended: boolean | null;
             WakeMode: string | null;
+            WakeOnEscalation: boolean | null;
             WorkDir: string | null;
         };
         AgentPatchSetInputBody: {

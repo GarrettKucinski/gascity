@@ -300,6 +300,10 @@
             "fresh"
           ],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "wake_on_escalation": {
+          "type": "boolean",
+          "description": "WakeOnEscalation opts this agent in to wake-on-mail: incoming\nmessages whose subject matches an escalation keyword (see\n[mail].escalation_keywords) auto-nudge the agent's session even\nwhen the sender did not pass --notify. Defaults to false. The\ncanonical case is the Mayor agent, which is the human operator's\ncontrol plane and must surface escalations without polling."
         }
       },
       "additionalProperties": false,
@@ -580,6 +584,10 @@
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
+        "wake_on_escalation": {
+          "type": "boolean",
+          "description": "WakeOnEscalation overrides the agent's wake_on_escalation flag."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -798,6 +806,10 @@
             "fresh"
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
+        },
+        "wake_on_escalation": {
+          "type": "boolean",
+          "description": "WakeOnEscalation overrides the agent's wake_on_escalation flag."
         },
         "pre_start_append": {
           "items": {
@@ -1282,6 +1294,13 @@
         "provider": {
           "type": "string",
           "description": "Provider selects the mail backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: beadmail)."
+        },
+        "escalation_keywords": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "EscalationKeywords overrides the built-in keyword list used to\nrecognize escalation subjects for wake-on-escalation. When empty,\nmail.DefaultEscalationKeywords is used. Matching is case-insensitive\nand whole-word; see internal/mail/escalation.go for semantics."
         }
       },
       "additionalProperties": false,

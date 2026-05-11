@@ -24,9 +24,12 @@ import (
 )
 
 // nudgeFunc is an optional callback for nudging an agent after sending or
-// replying to mail. When non-nil, it is called with the recipient name.
-// Errors are non-fatal.
-type nudgeFunc func(recipient string) error
+// replying to mail. When non-nil, it is called with the recipient name and
+// the message subject. Implementations decide internally whether to actually
+// send a nudge (e.g., always-on for explicit --notify, or only on escalation
+// subjects for wake-on-escalation recipients). Returning nil means either
+// the nudge was sent or it was intentionally skipped. Errors are non-fatal.
+type nudgeFunc func(recipient, subject string) error
 
 const (
 	mailInjectMaxMessages     = 3
@@ -34,14 +37,68 @@ const (
 	mailInjectPreviewScanSize = 4096
 )
 
+// newMailNudgeFunc returns a nudgeFunc that always nudges the recipient
+// (subject is ignored). Used when the caller passed --notify.
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient string) error {
+	return func(recipient, _ string) error {
 		target, err := resolveNudgeTarget(recipient, io.Discard)
 		if err != nil {
 			return err
 		}
 		return sendMailNotify(target, sender)
 	}
+}
+
+// newMailAutoWakeNudgeFunc returns a nudgeFunc that nudges only when the
+// recipient is configured with wake_on_escalation = true AND the subject
+// matches an escalation keyword from the city's [mail].escalation_keywords
+// list (or the default keyword list when unconfigured). This is the
+// wake-on-escalation policy that closes the control-plane visibility gap:
+// dormant Mayor sessions wake immediately on escalation mail without the
+// sender needing to remember --notify. Returns nil when the policy is
+// not satisfied.
+func newMailAutoWakeNudgeFunc(cfg *config.City, sender string) nudgeFunc {
+	return func(recipient, subject string) error {
+		if !mailRecipientWakesOnSubject(cfg, recipient, subject) {
+			return nil
+		}
+		target, err := resolveNudgeTarget(recipient, io.Discard)
+		if err != nil {
+			return err
+		}
+		return sendMailNotify(target, sender)
+	}
+}
+
+// mailRecipientWakesOnSubject reports whether the recipient agent has
+// wake_on_escalation = true AND the subject matches an escalation keyword.
+// Returns false when cfg is nil, the recipient is not a known agent, or
+// the recipient is the human pseudo-address.
+func mailRecipientWakesOnSubject(cfg *config.City, recipient, subject string) bool {
+	if cfg == nil || recipient == "" || recipient == "human" {
+		return false
+	}
+	a := findAgentForMailRecipient(cfg, recipient)
+	if a == nil || a.WakeOnEscalation == nil || !*a.WakeOnEscalation {
+		return false
+	}
+	return mail.IsEscalationSubject(subject, cfg.Mail.EscalationKeywords)
+}
+
+// findAgentForMailRecipient looks up the agent whose qualified identity
+// matches the recipient address. Matching uses AgentMatchesIdentity, which
+// handles both V1 ("dir/name") and V2 ("dir/binding.name", "binding.name")
+// qualified names. Returns nil if no agent matches.
+func findAgentForMailRecipient(cfg *config.City, recipient string) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
+	for i := range cfg.Agents {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], recipient) {
+			return &cfg.Agents[i]
+		}
+	}
+	return nil
 }
 
 func newMailCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1162,9 +1219,16 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 		}
 	}
 
+	// When --notify is set, always nudge the recipient. Otherwise install
+	// the auto-wake nudge so escalation subjects to opted-in recipients
+	// still wake their session.
 	var nf nudgeFunc
-	if notify && store != nil {
-		nf = newMailNudgeFunc(sender)
+	if store != nil {
+		if notify {
+			nf = newMailNudgeFunc(sender)
+		} else {
+			nf = newMailAutoWakeNudgeFunc(cfg, sender)
+		}
 	}
 
 	// When --to is set, prepend it to args so doMailSend sees [to, body].
@@ -1206,8 +1270,10 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
-// or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
-// recipient is nudged after message creation (skipped for "human").
+// or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil and the
+// recipient is not "human", nudgeFn is invoked with (recipient, subject); the
+// callback decides whether to actually send a nudge (always-on for --notify,
+// or only on escalation subjects for wake-on-escalation recipients).
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
@@ -1247,7 +1313,7 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 
 	// Nudge recipient if requested and recipient is not human.
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to); err != nil {
+		if err := nudgeFn(to, subject); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -1301,7 +1367,7 @@ func doMailSendAll(mp mail.Provider, rec events.Recorder, validRecipients map[st
 		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to); err != nil {
+			if err := nudgeFn(to, subject); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			}
 		}
@@ -1433,42 +1499,41 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 	var cityPath string
 	var cfg *config.City
 	var notifySetupErr error
-	if sender != "human" || notify {
-		switch {
-		case strings.HasPrefix(providerName, "exec:"):
-			var err error
-			cityPath, err = resolveCity()
-			if err == nil {
-				cfg, _ = loadCityConfig(cityPath, stderr)
-				store, err = openCityStoreAt(cityPath)
-			}
-			if err != nil {
-				notifySetupErr = err
-				store = nil
-			}
-		case !isStorelessMailProvider():
-			var storeCode int
-			store, storeCode = openCityStore(stderr, "gc mail reply")
-			if store == nil {
-				return storeCode
-			}
-			var err error
-			cityPath, err = resolveCity()
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+	// Always attempt to load cfg/store so auto-wake-on-escalation has the
+	// recipient's WakeOnEscalation flag available, not just when the sender
+	// is an agent or --notify was passed.
+	switch {
+	case strings.HasPrefix(providerName, "exec:"):
+		var err error
+		cityPath, err = resolveCity()
+		if err == nil {
 			cfg, _ = loadCityConfig(cityPath, stderr)
+			store, err = openCityStoreAt(cityPath)
 		}
-		if sender != "human" {
-			if store != nil {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
-				if !ok {
-					return 1
-				}
-				sender = resolved
-			}
+		if err != nil {
+			notifySetupErr = err
+			store = nil
 		}
+	case !isStorelessMailProvider():
+		var storeCode int
+		store, storeCode = openCityStore(stderr, "gc mail reply")
+		if store == nil {
+			return storeCode
+		}
+		var err error
+		cityPath, err = resolveCity()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cfg, _ = loadCityConfig(cityPath, stderr)
+	}
+	if sender != "human" && store != nil {
+		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+		if !ok {
+			return 1
+		}
+		sender = resolved
 	}
 
 	// Determine body from remaining args if -m not set.
@@ -1477,11 +1542,17 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 		body = strings.Join(args[1:], " ")
 	}
 
+	// When --notify is set, always nudge the recipient. Otherwise install
+	// the auto-wake nudge so escalation replies to opted-in recipients
+	// still wake their session (mirrors gc mail send).
 	var nf nudgeFunc
-	if notify && store != nil {
+	switch {
+	case notify && store != nil:
 		nf = newMailNudgeFunc(sender)
-	} else if notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil {
+	case notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil:
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
+	case store != nil:
+		nf = newMailAutoWakeNudgeFunc(cfg, sender)
 	}
 
 	return doMailReply(mp, rec, args[0], sender, subject, body, nf, stdout, stderr)
@@ -1505,7 +1576,7 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
 
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To); err != nil {
+		if err := nudgeFn(reply.To, subject); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}

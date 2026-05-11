@@ -208,6 +208,17 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 **ALWAYS use `gc session nudge`, NEVER `tmux send-keys`** (drops Enter key)
 
+### Wake-on-Escalation
+
+You are configured with `wake_on_escalation = true`. When **any** agent sends
+you mail whose subject matches a city-configured escalation keyword
+(`ESCALATION`, `RECOVERY`, `MERGE_FAILED`, `BLOCKED`, `STUCK`, `DIVERGENCE`,
+`DIVERGED`, `PAUSE` — or anything in `[mail].escalation_keywords`), your
+session is auto-nudged immediately even when the sender did not pass
+`--notify`. Your job on wake: triage and either resolve autonomously or
+surface to the operator. Routine messages (`WORK_DONE`, `FYI`, threaded
+`RE:` chatter) do not wake you — they wait for your next idle poll.
+
 ---
 
 ## Command Quick-Reference
