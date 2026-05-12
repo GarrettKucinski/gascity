@@ -30,7 +30,12 @@ print_failure_details() {
 
   echo "observable go test: failure details from $log" >&2
 
-  mapfile -t failed_tests < <(jq -r 'select(.Action == "fail" and .Test != null) | .Test' "$log" | sort -u)
+  # Avoid bash 4 `mapfile` so this runs on macOS's stock bash 3.2.
+  local -a failed_tests=()
+  local line
+  while IFS= read -r line; do
+    failed_tests+=("$line")
+  done < <(jq -r 'select(.Action == "fail" and .Test != null) | .Test' "$log" | sort -u)
   if [ "${#failed_tests[@]}" -gt 0 ]; then
     for test_name in "${failed_tests[@]}"; do
       echo "observable go test: failed test: $test_name" >&2
